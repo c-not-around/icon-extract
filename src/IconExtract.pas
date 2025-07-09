@@ -99,45 +99,47 @@ begin
   data.Dispose();
 end;
 
-function IconExtractFrames(fname: string): List<Image>; // FIXME close file-stream on fall
+function IconExtractFrames(fname: string): List<Image>;
 begin
   var data    := new BinaryReader(&File.OpenRead(fname));
   var entries := GetIconEntries(data);
   var length  := data.BaseStream.Length;
   result      := new List<Image>();
   
-  foreach var entry in entries do
-    begin
-      if (entry.Offset+entry.Size) > length then
-        raise new Exception($'Incorrect Offset={entry.Offset:X8} or Size={entry.Size} of IcoEntry.');
-      
-      data.BaseStream.Position := entry.Offset;
-      var header := data.ReadUInt32();
-      
-      var frame: array of byte;
-      if header = BMP_HEADER_ID then
-        begin
-          frame := new byte[BMP_HEADER_SIZE+entry.Size];
-          MakeBmpFileHeader(frame);
-        end
-      else if header = PNG_HEADER_ID then
-        frame := new byte[entry.Size]
-      else
-        raise new Exception($'Incorrect frame header=0x{header:X8} Offset=0x{entry.Offset}');
-      
-      data.BaseStream.Position := entry.Offset;
-      data.Read(frame, header = BMP_HEADER_ID ? BMP_HEADER_SIZE : 0, entry.Size);
-      
-      if header = BMP_HEADER_ID then // in ico format for BMP_INFO_HEADER height given x2. fix it.
-        &Array.Copy(BitConverter.GetBytes(longword(entry.Height)), 0, frame, $0016, sizeof(UInt32));
-      
-      var img := Image.FromStream(new MemoryStream(frame));
-      img.Tag := header = PNG_HEADER_ID ? 'png' : 'bmp';
-      result.Add(img);
-    end;
-  
-  data.Close();
-  data.Dispose();
+  try
+    foreach var entry in entries do
+      begin
+        if (entry.Offset+entry.Size) > length then
+          raise new Exception($'Incorrect Offset={entry.Offset:X8} or Size={entry.Size} of IcoEntry.');
+        
+        data.BaseStream.Position := entry.Offset;
+        var header := data.ReadUInt32();
+        
+        var frame: array of byte;
+        if header = BMP_HEADER_ID then
+          begin
+            frame := new byte[BMP_HEADER_SIZE+entry.Size];
+            MakeBmpFileHeader(frame);
+          end
+        else if header = PNG_HEADER_ID then
+          frame := new byte[entry.Size]
+        else
+          raise new Exception($'Incorrect frame header=0x{header:X8} Offset=0x{entry.Offset}');
+        
+        data.BaseStream.Position := entry.Offset;
+        data.Read(frame, header = BMP_HEADER_ID ? BMP_HEADER_SIZE : 0, entry.Size);
+        
+        if header = BMP_HEADER_ID then // in ico format for BMP_INFO_HEADER the height is set x2 unlike bmp format
+          &Array.Copy(BitConverter.GetBytes(longword(entry.Height)), 0, frame, $0016, sizeof(UInt32));
+        
+        var img := Image.FromStream(new MemoryStream(frame));
+        img.Tag := header = PNG_HEADER_ID ? 'png' : 'bmp';
+        result.Add(img);
+      end;
+  finally
+    data.Close();
+    data.Dispose();
+  end;
 end;
 
 procedure OpenSourceFile(fname: string);
@@ -170,7 +172,7 @@ begin
       var img := frames[i];
       
       var FrameNode              := new TreeNode();
-      FrameNode.Text             := $'frame{i} {img.Width}x{img.Height}';
+      FrameNode.Text             := $'frame{i}_{img.Width}x{img.Height}';
       FrameNode.ImageKey         := img.Tag.ToString();
       FrameNode.SelectedImageKey := FrameNode.ImageKey;
       FrameNode.Tag              := img;
@@ -292,7 +294,14 @@ end;
 
 procedure SaveAllClick(sender: object; e: EventArgs);
 begin
+  (var fname, var format) := FrameSaveDialog();
   
+  if not String.IsNullOrEmpty(fname) then
+    foreach var node: TreeNode in Sources.SelectedNode.Nodes do
+      begin
+        var img := node.Tag as Image;
+        img.Save(fname.Insert(fname.LastIndexOf('.'), '_'+node.Text), format);
+      end;
 end;
 {$endregion}
 
