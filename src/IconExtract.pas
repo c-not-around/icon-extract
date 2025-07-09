@@ -41,13 +41,16 @@ type
 
 
 const
-  ICO_HEADER_SIZE = 6;
-  ICO_ENTRY_SIZE  = 16;
-  ICO_HDR_RESERVE = $0000;
-  ICO_HDR_TYPE    = $0001;
-  BMP_HEADER_ID   = $00000028;
-  PNG_HEADER_ID   = $474E5089;
-  BMP_HEADER_SIZE = 14;
+  ICO_HEADER_SIZE    = 6;
+  ICO_HEADER_TYPE    = $0001;
+  ICO_HEADER_RESERVE = $0000;
+  ICO_ENTRY_SIZE     = 16;
+  BMP_HEADER_SIZE    = 14;
+  BMP_HEADER_TYPE    = $4D42;
+  BMP_HEADER_RESERVE = $0000;
+  BMP_INFO_SIZE      = 40;
+  BMP_HEADER_ID      = $00000028;
+  PNG_HEADER_ID      = $474E5089;
   
 
 var
@@ -66,7 +69,7 @@ begin
   if length <= (ICO_HEADER_SIZE+ICO_ENTRY_SIZE) then
     raise new Exception($'Invalid file length={length}.');
   // ICO_FILE_HEADER
-  if (data.ReadUInt16() <> ICO_HDR_RESERVE) or (data.ReadUInt16() <> ICO_HDR_TYPE) then
+  if (data.ReadUInt16() <> ICO_HEADER_RESERVE) or (data.ReadUInt16() <> ICO_HEADER_TYPE) then
     raise new Exception('Invalid Header.');
   var count := data.ReadUInt16();
   if length <= (ICO_HEADER_SIZE+count*ICO_ENTRY_SIZE) then
@@ -90,23 +93,24 @@ end;
 procedure MakeBmpFileHeader(buffer: array of byte);
 begin
   var data := new BinaryWriter(new MemoryStream(buffer));
-  data.Write(word($4D42));
+  data.Write(word(BMP_HEADER_TYPE));
   data.Write(longword(buffer.Length));
-  data.Write(word($0000));
-  data.Write(word($0000));
-  data.Write(longword($00000036));
+  data.Write(word(BMP_HEADER_RESERVE));
+  data.Write(word(BMP_HEADER_RESERVE));
+  data.Write(longword(BMP_HEADER_SIZE+BMP_INFO_SIZE));
   data.Close();
   data.Dispose();
 end;
 
 function IconExtractFrames(fname: string): List<Image>;
 begin
-  var data    := new BinaryReader(&File.OpenRead(fname));
-  var entries := GetIconEntries(data);
-  var length  := data.BaseStream.Length;
-  result      := new List<Image>();
+  var data   := new BinaryReader(&File.OpenRead(fname));
+  var length := data.BaseStream.Length;
+  result     := new List<Image>();
   
   try
+    var entries := GetIconEntries(data);
+    
     foreach var entry in entries do
       begin
         if (entry.Offset+entry.Size) > length then
@@ -130,7 +134,7 @@ begin
         data.Read(frame, header = BMP_HEADER_ID ? BMP_HEADER_SIZE : 0, entry.Size);
         
         if header = BMP_HEADER_ID then // in ico format for BMP_INFO_HEADER the height is set x2 unlike bmp format
-          &Array.Copy(BitConverter.GetBytes(longword(entry.Height)), 0, frame, $0016, sizeof(UInt32));
+          &Array.Copy(BitConverter.GetBytes(longword(entry.Height)), 0, frame, BMP_HEADER_SIZE+2*sizeof(UInt32), sizeof(UInt32));
         
         var img := Image.FromStream(new MemoryStream(frame));
         img.Tag := header = PNG_HEADER_ID ? 'png' : 'bmp';
@@ -400,10 +404,10 @@ begin
   {$region App}
   begin
     var args := Environment.GetCommandLineArgs();
-    (*
+    
     if args.Length > 1 then
       for var i := 1 to args.Length-1 do
-        OpenSourceFile(args[i].Trim('"'));*)
+        OpenSourceFile(args[i].Trim('"'));
   end;
   
   Application.Run(Main);
