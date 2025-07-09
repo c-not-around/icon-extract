@@ -102,11 +102,46 @@ begin
   data.Dispose();
 end;
 
-function IconExtractFrames(fname: string): List<Image>;
+function ExtractBmpFrame(data: BinaryReader; offset: integer): Bitmap;
+begin
+  (*
+  0000: uint32_t Size
+  0004: uint32_t Width
+  0008: uint32_t Height
+  000C: uint16_t Planes
+  000E: uint16_t BitCount
+  0010: uint32_t Compression
+  0014: uint32_t ImageSize
+  0018: uint32_t PxPerMeterX
+  001C: uint32_t PxPerMeterY
+  0020: uint32_t ColorUsed
+  0024: uint32_t ColorImport
+  *)
+  
+  data.BaseStream.Position := offset + sizeof(UInt32);
+  var width  := data.ReadUInt32();
+  var height := data.ReadUInt32() shr 1;
+  data.BaseStream.Position += 2*sizeof(UInt16) + 6*sizeof(UInt32);
+  
+  result := new Bitmap(width, height);
+  
+  for var h := height-1 downto 0 do
+    for var w := 0 to width-1 do
+      begin
+        var b := data.ReadByte();
+        var g := data.ReadByte();
+        var r := data.ReadByte();
+        var a := data.ReadByte();
+        
+        result.SetPixel(w, h, Color.FromArgb(a, r, g, b));
+      end;
+end;
+
+function IconExtractFrames(fname: string): List<Bitmap>;
 begin
   var data   := new BinaryReader(&File.OpenRead(fname));
   var length := data.BaseStream.Length;
-  result     := new List<Image>();
+  result     := new List<Bitmap>();
   
   try
     var entries := GetIconEntries(data);
@@ -136,9 +171,24 @@ begin
         if header = BMP_HEADER_ID then // in ico format for BMP_INFO_HEADER the height is set x2 unlike bmp format
           &Array.Copy(BitConverter.GetBytes(longword(entry.Height)), 0, frame, BMP_HEADER_SIZE+2*sizeof(UInt32), sizeof(UInt32));
         
-        var img := Image.FromStream(new MemoryStream(frame));
-        img.Tag := header = PNG_HEADER_ID ? 'png' : 'bmp';
-        result.Add(img);
+        var bmp := new Bitmap(new MemoryStream(frame), true);
+        bmp.MakeTransparent();
+        bmp.Tag := header = PNG_HEADER_ID ? 'png' : 'bmp';
+        result.Add(bmp);
+        
+        (*var bmp: Bitmap;
+        if header = PNG_HEADER_ID then
+          begin
+            bmp     := new Bitmap(new MemoryStream(frame), true);
+            bmp.Tag := 'png';
+            bmp.MakeTransparent();
+          end
+        else
+          begin
+            bmp     := ExtractBmpFrame(data, entry.Offset);
+            bmp.Tag := 'bmp';
+          end;
+        result.Add(bmp);*)
       end;
   finally
     data.Close();
@@ -148,7 +198,7 @@ end;
 
 procedure OpenSourceFile(fname: string);
 begin
-  var frames: List<Image>;
+  var frames: List<Bitmap>;
   
   try
     frames := IconExtractFrames(fname);
@@ -156,8 +206,7 @@ begin
     begin
       MessageBox.Show
       (
-        String.Format('File "{0}" open error: {1}', fname, ex.Message),
-        'Error',
+        $'File "{fname}" open error: {ex.Message}', 'Error',
         MessageBoxButtons.OK, 
         MessageBoxIcon.Error
       );
@@ -232,11 +281,17 @@ procedure SourcesAfterSelect(sender: object; e: TreeViewEventArgs);
 begin
   if e.Node.Level > 0 then
     begin
-      var img := e.Node.Tag as Image;
+      var bmp := e.Node.Tag as Bitmap;
       
       var b := new Bitmap(ImageView.Width, ImageView.Height);
       var g := Graphics.FromImage(b);
-      g.DrawImage(img, (b.Width-img.Width) div 2, (b.Height-img.Height) div 2);
+      for var w := 0 to 15 do
+        for var h := 0 to 15 do
+          begin
+            var c := ((w and $01) = $01) xor ((h and $01) = $01) ? Color.LightGray : Color.White;
+            g.FillRectangle(new SolidBrush(c), 16*w, 16*h, 16, 16);
+          end;
+      g.DrawImage(bmp, (b.Width-bmp.Width) div 2, (b.Height-bmp.Height) div 2);
       
       var old := ImageView.Image;
       
@@ -291,7 +346,7 @@ begin
   
   if not String.IsNullOrEmpty(fname) then
     begin
-      var img := Sources.SelectedNode.Tag as Image;
+      var img := Sources.SelectedNode.Tag as Bitmap;
       img.Save(fname, format);
     end;
 end;
@@ -303,7 +358,7 @@ begin
   if not String.IsNullOrEmpty(fname) then
     foreach var node: TreeNode in Sources.SelectedNode.Nodes do
       begin
-        var img := node.Tag as Image;
+        var img := node.Tag as Bitmap;
         img.Save(fname.Insert(fname.LastIndexOf('.'), '_'+node.Text), format);
       end;
 end;
