@@ -63,6 +63,18 @@ var
 
 
 {$region Routines}
+function BinaryReader.ReadArgb(alpha: boolean := false): Color;
+begin
+  var b := self.ReadByte();
+  var g := self.ReadByte();
+  var r := self.ReadByte();
+  var a := self.ReadByte();
+          
+  result := Color.FromArgb(alpha ? a : $FF, r, g, b);
+end;
+
+function Color.Mask() := Color.FromArgb($00, self.R, self.G, self.B);
+
 function GetIconEntries(data: BinaryReader): array of IconEntry;
 begin
   var length := data.BaseStream.Length;
@@ -90,16 +102,36 @@ begin
       end;
 end;
 
-procedure MakeBmpFileHeader(buffer: array of byte);
+function ExtractBitmap(data: BinaryReader; width, height, bits: integer; params palette: array of Color): Bitmap;
 begin
-  var data := new BinaryWriter(new MemoryStream(buffer));
-  data.Write(word(BMP_HEADER_TYPE));
-  data.Write(longword(buffer.Length));
-  data.Write(word(BMP_HEADER_RESERVE));
-  data.Write(word(BMP_HEADER_RESERVE));
-  data.Write(longword(BMP_HEADER_SIZE+BMP_INFO_SIZE));
-  data.Close();
-  data.Dispose();
+  var BitMask := $FF shr (8 - bits);
+  var decode: integer -> integer;
+  case bits of
+    1: decode := w -> (w and $18) + (7 - (w and $7)); 
+    4: decode := w -> 4 * ((w and $6) + (1 - (w and $1)));
+    8: decode := w -> (w and $3) shl 3;
+  end;
+  
+  result := new Bitmap(width, height);
+  
+  for var h := height-1 downto 0 do
+    begin
+      var row : longword;
+      var bit := 32;
+      
+      for var w := 0 to width-1 do
+        begin
+          if bit = 32 then
+            begin
+              row := data.ReadUInt32();
+              bit := 0;
+            end;
+          
+          result.SetPixel(w, h, palette[(row shr decode(w)) and BitMask]);
+          
+          bit += bits;
+        end;
+    end;
 end;
 
 function ExtractBmpFrame(data: BinaryReader; offset: integer): Bitmap;
@@ -117,102 +149,104 @@ begin
   0020: uint32_t ColorUsed
   0024: uint32_t ColorImport
   *)
-  
   data.BaseStream.Position := offset + sizeof(UInt32);
   var width  := data.ReadUInt32();
   var height := data.ReadUInt32() shr 1;
-  data.BaseStream.Position += 2*sizeof(UInt16) + 6*sizeof(UInt32);
+  data.BaseStream.Position += sizeof(UInt16);
+  var bits   := data.ReadUInt16();
+  data.BaseStream.Position += 6*sizeof(UInt32);
   
-  result := new Bitmap(width, height);
+  if bits <= 8 then
+    begin
+      var pallete := new Color[1 shl bits];
+      for var i := 0 to pallete.Length-1 do
+        pallete[i] := data.ReadArgb();
   
-  for var h := height-1 downto 0 do
-    for var w := 0 to width-1 do
-      begin
-        var b := data.ReadByte();
-        var g := data.ReadByte();
-        var r := data.ReadByte();
-        var a := data.ReadByte();
-        
-        result.SetPixel(w, h, Color.FromArgb(a, r, g, b));
-      end;
+      result := ExtractBitmap(data, width, height, bits, pallete);
+      
+      if bits > 1 then
+        begin
+          var size := 4 * ((width + 31) div 32) * height;
+      
+          if (data.BaseStream.Length - data.BaseStream.Position) >= size then
+            begin
+              var mask := ExtractBitmap(data, width, height, 1,
+                                        Color.FromArgb($FF, $00, $00, $00),
+                                        Color.FromArgb($00, $00, $00, $00));
+              
+              for var w := 0 to width-1 do
+                for var h := 0 to height-1 do
+                  if mask.GetPixel(w, h).A = $00 then
+                    begin
+                      var c := result.GetPixel(w, h);
+                      result.SetPixel(w, h, c.Mask());
+                    end;
+            end;
+        end;
+    end
+  else
+    begin
+      result := new Bitmap(width, height);
+  
+      for var h := height-1 downto 0 do
+        for var w := 0 to width-1 do
+          result.SetPixel(w, h, data.ReadArgb(true));
+    end;
 end;
 
-function IconExtractFrames(fname: string): List<Bitmap>;
+function IconExtractFrames(data: BinaryReader): List<Bitmap>;
 begin
-  var data   := new BinaryReader(&File.OpenRead(fname));
-  var length := data.BaseStream.Length;
-  result     := new List<Bitmap>();
+  result := new List<Bitmap>();
   
-  try
-    var entries := GetIconEntries(data);
-    
-    foreach var entry in entries do
-      begin
-        if (entry.Offset+entry.Size) > length then
-          raise new Exception($'Incorrect Offset={entry.Offset:X8} or Size={entry.Size} of IcoEntry.');
+  foreach var entry in GetIconEntries(data) do
+    begin
+      if (entry.Offset+entry.Size) > data.BaseStream.Length then
+        raise new Exception($'Incorrect Offset={entry.Offset:X8} or Size={entry.Size} of IcoEntry.');
         
-        data.BaseStream.Position := entry.Offset;
-        var header := data.ReadUInt32();
+      data.BaseStream.Position := entry.Offset;
+      var header := data.ReadUInt32();
         
-        var frame: array of byte;
-        if header = BMP_HEADER_ID then
-          begin
-            frame := new byte[BMP_HEADER_SIZE+entry.Size];
-            MakeBmpFileHeader(frame);
-          end
-        else if header = PNG_HEADER_ID then
-          frame := new byte[entry.Size]
-        else
-          raise new Exception($'Incorrect frame header=0x{header:X8} Offset=0x{entry.Offset}');
-        
-        data.BaseStream.Position := entry.Offset;
-        data.Read(frame, header = BMP_HEADER_ID ? BMP_HEADER_SIZE : 0, entry.Size);
-        
-        if header = BMP_HEADER_ID then // in ico format for BMP_INFO_HEADER the height is set x2 unlike bmp format
-          &Array.Copy(BitConverter.GetBytes(longword(entry.Height)), 0, frame, BMP_HEADER_SIZE+2*sizeof(UInt32), sizeof(UInt32));
-        
-        var bmp := new Bitmap(new MemoryStream(frame), true);
-        bmp.MakeTransparent();
-        bmp.Tag := header = PNG_HEADER_ID ? 'png' : 'bmp';
-        result.Add(bmp);
-        
-        (*var bmp: Bitmap;
-        if header = PNG_HEADER_ID then
-          begin
-            bmp     := new Bitmap(new MemoryStream(frame), true);
-            bmp.Tag := 'png';
-            bmp.MakeTransparent();
-          end
-        else
-          begin
-            bmp     := ExtractBmpFrame(data, entry.Offset);
-            bmp.Tag := 'bmp';
-          end;
-        result.Add(bmp);*)
-      end;
-  finally
-    data.Close();
-    data.Dispose();
-  end;
+      var bmp: Bitmap;
+      if header = BMP_HEADER_ID then
+        begin
+          bmp     := ExtractBmpFrame(data, entry.Offset);
+          bmp.Tag := 'bmp';
+        end
+      else if header = PNG_HEADER_ID then
+        begin
+          var frame := new byte[entry.Size];
+          data.BaseStream.Position := entry.Offset;
+          data.Read(frame, 0, entry.Size);
+            
+          bmp     := new Bitmap(new MemoryStream(frame), true);
+          bmp.Tag := 'png';
+          bmp.MakeTransparent();
+        end
+      else
+        raise new Exception($'Incorrect frame header=0x{header:X8} Offset=0x{entry.Offset}');
+          
+      result.Add(bmp);
+    end;
 end;
 
 procedure OpenSourceFile(fname: string);
 begin
   var frames: List<Bitmap>;
-  
+  var data := new BinaryReader(&File.OpenRead(fname));
   try
-    frames := IconExtractFrames(fname);
+    frames := IconExtractFrames(data);
   except on ex: Exception do
     begin
       MessageBox.Show
       (
         $'File "{fname}" open error: {ex.Message}', 'Error',
-        MessageBoxButtons.OK, 
-        MessageBoxIcon.Error
+        MessageBoxButtons.OK, MessageBoxIcon.Error
       );
       exit;
     end;
   end;
+  data.Close();
+  data.Dispose();
   
   var IconNode         := new TreeNode();
   IconNode.Text        := fname.Substring(fname.LastIndexOf('\')+1);
@@ -460,7 +494,7 @@ begin
   begin
     var args := Environment.GetCommandLineArgs();
     
-    if args.Length > 1 then
+    if (args.Length > 1) and (args[1] <> '[REDIRECTIOMODE]') then
       for var i := 1 to args.Length-1 do
         OpenSourceFile(args[i].Trim('"'));
   end;
